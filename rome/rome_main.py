@@ -1,6 +1,6 @@
 from copy import deepcopy
 from typing import Dict, List, Tuple
-
+import unicodedata
 import torch
 from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -159,13 +159,21 @@ def get_context_templates(model, tok, length_params):
             x + ". {}"
             for x in sum(
                 (
+                    # generate_fast(
                     generate_fast(
                         model,
                         tok,
-                        ["<|endoftext|>"],
+                        ["Math "],
                         n_gen_per_prompt=n_gen,
                         max_out_len=length,
                     )
+                    # generate_domain_specific(
+                    #     model,
+                    #     tok,
+                    #     ["science"],
+                    #     n_gen_per_prompt=n_gen,
+                    #     max_out_len=length,
+                    # )
                     for length, n_gen in length_params
                 ),
                 [],
@@ -175,3 +183,95 @@ def get_context_templates(model, tok, length_params):
         print(f"Cached context templates {CONTEXT_TEMPLATES_CACHE}")
 
     return CONTEXT_TEMPLATES_CACHE
+
+def generate_domain_specific(
+    model: AutoModelForCausalLM,
+    tok: AutoTokenizer,
+    domain_keywords: List[str],
+    n_gen_per_prompt: int = 1,
+    top_k: int = 5,
+    max_out_len: int = 200,
+    domain: str = "science"
+):
+    """
+    Fast, parallelized auto-regressive text generation with top-k sampling,
+    focused on a specific domain.
+    """
+
+    # Define seed prompts that are relevant to the Technology domain.
+    seed_prompts = [
+        "Science has greatly impacted ",
+        "Scientific discoveries in recent years include ",
+        "In the realm of science, a notable breakthrough is ",
+        "Current scientific trends involve ",
+        "Leading scientists believe that ",
+        "The field of science is evolving with ",
+        "Science is key to understanding ",
+        "Revolutionary scientific research shows ",
+        "The science community is focusing on ",
+        "Innovations in science cover topics like "
+    ]
+
+
+    # Unroll seed prompts and tokenize
+    inp = [seed for seed in seed_prompts for _ in range(n_gen_per_prompt)]
+    inp_tok = tok(inp, padding=True, return_tensors="pt").to(
+        next(model.parameters()).device
+    )
+    input_ids, attention_mask = inp_tok["input_ids"], inp_tok["attention_mask"]
+    batch_size = input_ids.size(0)
+    
+    # Setup storage of fast generation with attention caches.
+    past_key_values, cur_context = None, slice(0, attention_mask.sum(1).min().item())
+
+    with torch.no_grad():
+        while input_ids.size(1) < max_out_len:
+            model_out = model(
+                input_ids=input_ids[:, cur_context],
+                attention_mask=attention_mask[:, cur_context],
+                past_key_values=past_key_values,
+                use_cache=True,
+            )
+            logits, past_key_values = model_out.logits, model_out.past_key_values
+            softmax_out = torch.nn.functional.softmax(logits[:, -1, :], dim=1)
+
+            # Top-k sampling
+            tk = torch.topk(softmax_out, top_k, dim=1).indices
+            softmax_out_top_k = torch.gather(softmax_out, 1, tk)
+            softmax_out_top_k = softmax_out_top_k / softmax_out_top_k.sum(1)[:, None]
+            new_tok_indices = torch.multinomial(softmax_out_top_k, 1)
+            new_toks = torch.gather(tk, 1, new_tok_indices)
+
+            # Append new tokens to the input
+            if cur_context.stop == input_ids.size(1):
+                attention_mask = torch.cat(
+                    [attention_mask, attention_mask.new_zeros(batch_size, 1)], dim=1
+                )
+                input_ids = torch.cat(
+                    [
+                        input_ids,
+                        input_ids.new_ones(batch_size, 1) * tok.pad_token_id,
+                    ],
+                    dim=1,
+                )
+
+            last_non_masked = attention_mask.sum(1) - 1
+            for i in range(batch_size):
+                new_idx = last_non_masked[i] + 1
+                if new_idx < max_out_len and new_idx < input_ids.size(1):
+                    input_ids[i][new_idx] = new_toks[i]
+                    attention_mask[i][new_idx] = 1
+
+            cur_context = slice(cur_context.stop, cur_context.stop + 1)
+
+    # Decode and clean up the generated text
+    txt = [tok.decode(x) for x in input_ids.detach().cpu().numpy().tolist()]
+    txt = [unicodedata.normalize("NFKD", x).replace("\n\n", " ").replace("<|endoftext|>", "").strip() for x in txt]
+
+    # Filter for domain-specific content
+    domain_specific_txt = [
+        sentence for sentence in txt if any(keyword in sentence for keyword in domain_keywords)
+    ]
+    
+    return domain_specific_txt
+

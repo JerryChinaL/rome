@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import scipy.sparse as sp
 import torch
-from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.feature_extraction.text import TfidfVectorizer, TfidfTransformer
 
 from dsets import AttributeSnippets
 from util.globals import *
@@ -14,12 +14,33 @@ REMOTE_IDF_URL = f"{REMOTE_ROOT_URL}/data/dsets/idf.npy"
 REMOTE_VOCAB_URL = f"{REMOTE_ROOT_URL}/data/dsets/tfidf_vocab.json"
 
 
-def get_tfidf_vectorizer(data_dir: str):
-    """
-    Returns an sklearn TF-IDF vectorizer. See their website for docs.
-    Loading hack inspired by some online blog post lol.
-    """
+# def get_tfidf_vectorizer(data_dir: str):
+#     """
+#     Returns an sklearn TF-IDF vectorizer. See their website for docs.
+#     Loading hack inspired by some online blog post lol.
+#     """
 
+#     data_dir = Path(data_dir)
+
+#     idf_loc, vocab_loc = data_dir / "idf.npy", data_dir / "tfidf_vocab.json"
+#     if not (idf_loc.exists() and vocab_loc.exists()):
+#         collect_stats(data_dir)
+
+#     idf = np.load(idf_loc)
+#     with open(vocab_loc, "r",  encoding="utf8") as f:
+#         vocab = json.load(f)
+
+#     class MyVectorizer(TfidfVectorizer):
+#         TfidfVectorizer.idf_ = idf
+
+#     vec = MyVectorizer()
+#     vec.vocabulary_ = vocab
+#     vec._tfidf._idf_diag = sp.spdiags(idf, diags=0, m=len(idf), n=len(idf))
+
+#     return vec
+
+
+def get_tfidf_vectorizer(data_dir: str):
     data_dir = Path(data_dir)
 
     idf_loc, vocab_loc = data_dir / "idf.npy", data_dir / "tfidf_vocab.json"
@@ -27,17 +48,21 @@ def get_tfidf_vectorizer(data_dir: str):
         collect_stats(data_dir)
 
     idf = np.load(idf_loc)
-    with open(vocab_loc, "r") as f:
+    with open(vocab_loc, "r", encoding="utf8") as f:
         vocab = json.load(f)
 
     class MyVectorizer(TfidfVectorizer):
-        TfidfVectorizer.idf_ = idf
+        def __init__(self, *args, **kwargs):
+            super(MyVectorizer, self).__init__(*args, **kwargs)
 
     vec = MyVectorizer()
     vec.vocabulary_ = vocab
-    vec._tfidf._idf_diag = sp.spdiags(idf, diags=0, m=len(idf), n=len(idf))
+    vec.idf_ = idf
+    vec._tfidf = TfidfTransformer(norm=vec.norm, use_idf=vec.use_idf)
+    vec._tfidf.fit(sp.csr_matrix(np.zeros((1, len(idf)))))
 
     return vec
+
 
 
 def collect_stats(data_dir: str):

@@ -28,9 +28,11 @@ def compute_v(
     print("Computing right vector (v)")
 
     # Tokenize target into list of int token IDs
+    print("request: ", request)
     target_ids = tok(request["target_new"]["str"], return_tensors="pt").to("cuda")[
         "input_ids"
     ][0]
+    
 
     # Compile list of rewriting and KL x/y pairs
     rewriting_prompts, kl_prompts = [
